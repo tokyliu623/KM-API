@@ -1,0 +1,504 @@
+import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import { promises as fs } from 'fs';
+import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
+
+const app = express();
+const PORT = process.env.PORT || 5052;
+const DATA_DIR = path.join(process.cwd(), 'data');
+const TOKEN_FILE = path.join(DATA_DIR, 'token-store.json');
+const AUDIT_FILE = path.join(DATA_DIR, 'audit-log.json');
+const WIKI_BASE_URL = process.env.WIKI_BASE_URL || 'https://wiki.vivo.xyz';
+
+app.use(cors());
+app.use(express.json());
+
+interface TokenRecord {
+  id: string;
+  kb_name: string;
+  kb_id: string;
+  owner: string;
+  token: string;
+  env: string;
+  status: 'active' | 'revoked';
+  remark?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AuditRecord {
+  id: string;
+  token_id: string;
+  kb_name: string;
+  action: string;
+  user_ip?: string;
+  user_agent?: string;
+  latency_ms?: number;
+  status: 'success' | 'failed';
+  error?: string;
+  created_at: string;
+}
+
+interface TokenStoreDB {
+  tokens: TokenRecord[];
+}
+
+interface AuditDB {
+  logs: AuditRecord[];
+}
+
+interface VivoApiResponse<T = unknown> {
+  code: number;
+  msg: string;
+  data?: T;
+}
+
+async function readJsonFile<T>(filepath: string, defaultValue: T): Promise<T> {
+  try {
+    const content = await fs.readFile(filepath, 'utf-8');
+    return JSON.parse(content) as T;
+  } catch {
+    return defaultValue;
+  }
+}
+
+async function writeJsonFile<T>(filepath: string, data: T): Promise<void> {
+  await fs.writeFile(filepath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+async function initStore(): Promise<void> {
+  try {
+    await fs.access(DATA_DIR);
+  } catch {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+  }
+
+  const tokenDb = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  if (!('tokens' in tokenDb)) {
+    await writeJsonFile(TOKEN_FILE, { tokens: [] });
+  }
+
+  const auditDb = await readJsonFile<AuditDB>(AUDIT_FILE, { logs: [] });
+  if (!('logs' in auditDb)) {
+    await writeJsonFile(AUDIT_FILE, { logs: [] });
+  }
+}
+
+async function logAudit(data: Omit<AuditRecord, 'id' | 'created_at'>): Promise<void> {
+  const db = await readJsonFile<AuditDB>(AUDIT_FILE, { logs: [] });
+  const record: AuditRecord = {
+    ...data,
+    id: uuidv4(),
+    created_at: new Date().toISOString(),
+  };
+  db.logs.push(record);
+  await writeJsonFile(AUDIT_FILE, db);
+}
+
+async function callWikiApi<T>(
+  endpoint: string,
+  payload: Record<string, unknown>,
+  accessToken: string
+): Promise<VivoApiResponse<T>> {
+  const url = `${WIKI_BASE_URL}${endpoint}`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      return {
+        code: response.status,
+        msg: `HTTP error: ${response.status} ${response.statusText}`,
+      };
+    }
+
+    return response.json();
+  } catch (err) {
+    return {
+      code: -1,
+      msg: err instanceof Error ? err.message : 'Unknown error',
+    };
+  }
+}
+
+async function testToken(token: string): Promise<{ valid: boolean; error?: string }> {
+  const result = await callWikiApi<{ kb_list: Array<{ id: string; name: string }> }>(
+    '/api/v1/kb/list',
+    {},
+    token
+  );
+
+  if (result.code === 0) {
+    return { valid: true };
+  }
+
+  return {
+    valid: false,
+    error: result.msg || 'Token validation failed',
+  };
+}
+
+function maskToken(token: string): string {
+  if (token.length <= 8) {
+    return '****';
+  }
+  return token.substring(0, 4) + '****' + token.substring(token.length - 4);
+}
+
+function getClientIp(req: Request): string {
+  return (req.headers['x-forwarded-for'] as string) || req.ip || 'unknown';
+}
+
+async function withAudit(
+  action: string,
+  kbName: string,
+  fn: () => Promise<VivoApiResponse<unknown>>
+): Promise<VivoApiResponse<unknown>> {
+  const startTime = Date.now();
+  const req = {} as Request;
+
+  try {
+    const result = await fn();
+    await logAudit({
+      token_id: '',
+      kb_name: kbName,
+      action,
+      user_ip: getClientIp(req),
+      latency_ms: Date.now() - startTime,
+      status: result.code === 0 || result.code === 1 ? 'success' : 'failed',
+      error: result.code !== 0 && result.code !== 1 ? result.msg : undefined,
+    });
+    return result;
+  } catch (err) {
+    await logAudit({
+      token_id: '',
+      kb_name: kbName,
+      action,
+      user_ip: getClientIp(req),
+      latency_ms: Date.now() - startTime,
+      status: 'failed',
+      error: err instanceof Error ? err.message : 'Unknown error',
+    });
+    return {
+      code: -1,
+      msg: err instanceof Error ? err.message : 'Unknown error',
+    };
+  }
+}
+
+app.get('/api/health', async (req, res) => {
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const activeTokens = db.tokens.filter((t) => t.status === 'active').length;
+
+  res.json({
+    status: 'ok',
+    activeTokens,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post('/api/admin/tokens/upload', async (req, res) => {
+  const { kb_name, kb_id, owner, token, env, remark } = req.body;
+
+  if (!kb_name || !kb_id || !owner || !token || !env) {
+    res.json({ code: -1, msg: 'Missing required fields' });
+    return;
+  }
+
+  const tokenTest = await testToken(token);
+  if (!tokenTest.valid) {
+    res.json({ code: -1, msg: `Token validation failed: ${tokenTest.error}` });
+    return;
+  }
+
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const existing = db.tokens.find((t) => t.kb_id === kb_id && t.env === env && t.status === 'active');
+
+  if (existing) {
+    res.json({ code: -1, msg: 'Token already exists for this KB and environment' });
+    return;
+  }
+
+  const newToken: TokenRecord = {
+    id: uuidv4(),
+    kb_name,
+    kb_id,
+    owner,
+    token,
+    env,
+    status: 'active',
+    remark,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  db.tokens.push(newToken);
+  await writeJsonFile(TOKEN_FILE, db);
+
+  await logAudit({
+    token_id: newToken.id,
+    kb_name,
+    action: 'token_upload',
+    status: 'success',
+  });
+
+  res.json({
+    code: 1,
+    msg: 'Token uploaded successfully',
+    data: {
+      id: newToken.id,
+      kb_name: newToken.kb_name,
+      kb_id: newToken.kb_id,
+      owner: newToken.owner,
+      env: newToken.env,
+      status: newToken.status,
+      created_at: newToken.created_at,
+    },
+  });
+});
+
+app.get('/api/admin/tokens/list', async (req, res) => {
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+
+  const tokens = db.tokens.map((t) => ({
+    id: t.id,
+    kb_name: t.kb_name,
+    kb_id: t.kb_id,
+    owner: t.owner,
+    token: maskToken(t.token),
+    env: t.env,
+    status: t.status,
+    remark: t.remark,
+    created_at: t.created_at,
+    updated_at: t.updated_at,
+  }));
+
+  res.json({
+    code: 1,
+    msg: 'success',
+    data: { tokens },
+  });
+});
+
+app.post('/api/admin/tokens/update', async (req, res) => {
+  const { id, kb_name, kb_id, owner, token, env, status, remark } = req.body;
+
+  if (!id) {
+    res.json({ code: -1, msg: 'Token ID is required' });
+    return;
+  }
+
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const index = db.tokens.findIndex((t) => t.id === id);
+
+  if (index === -1) {
+    res.json({ code: -1, msg: 'Token not found' });
+    return;
+  }
+
+  if (token) {
+    const tokenTest = await testToken(token);
+    if (!tokenTest.valid) {
+      res.json({ code: -1, msg: `Token validation failed: ${tokenTest.error}` });
+      return;
+    }
+  }
+
+  const updateData: Partial<TokenRecord> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (kb_name !== undefined) updateData.kb_name = kb_name;
+  if (kb_id !== undefined) updateData.kb_id = kb_id;
+  if (owner !== undefined) updateData.owner = owner;
+  if (token !== undefined) updateData.token = token;
+  if (env !== undefined) updateData.env = env;
+  if (status !== undefined) updateData.status = status;
+  if (remark !== undefined) updateData.remark = remark;
+
+  db.tokens[index] = { ...db.tokens[index], ...updateData };
+  await writeJsonFile(TOKEN_FILE, db);
+
+  await logAudit({
+    token_id: id,
+    kb_name: db.tokens[index].kb_name,
+    action: 'token_update',
+    status: 'success',
+  });
+
+  res.json({
+    code: 1,
+    msg: 'Token updated successfully',
+    data: {
+      id: db.tokens[index].id,
+      kb_name: db.tokens[index].kb_name,
+      status: db.tokens[index].status,
+    },
+  });
+});
+
+app.post('/api/admin/tokens/revoke', async (req, res) => {
+  const { id } = req.body;
+
+  if (!id) {
+    res.json({ code: -1, msg: 'Token ID is required' });
+    return;
+  }
+
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const index = db.tokens.findIndex((t) => t.id === id);
+
+  if (index === -1) {
+    res.json({ code: -1, msg: 'Token not found' });
+    return;
+  }
+
+  db.tokens[index].status = 'revoked';
+  db.tokens[index].updated_at = new Date().toISOString();
+  await writeJsonFile(TOKEN_FILE, db);
+
+  await logAudit({
+    token_id: id,
+    kb_name: db.tokens[index].kb_name,
+    action: 'token_revoke',
+    status: 'success',
+  });
+
+  res.json({
+    code: 1,
+    msg: 'Token revoked successfully',
+  });
+});
+
+app.post('/api/kb/info', async (req, res) => {
+  const { token_id, kb_id } = req.body;
+
+  if (!token_id || !kb_id) {
+    res.json({ code: -1, msg: 'token_id and kb_id are required' });
+    return;
+  }
+
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
+
+  if (!tokenRecord) {
+    res.json({ code: -1, msg: 'Token not found or inactive' });
+    return;
+  }
+
+  const result = await callWikiApi<{ kb_list: Array<{ id: string; name: string; owner: string }> }>(
+    '/api/v1/kb/list',
+    {},
+    tokenRecord.token
+  );
+
+  res.json(result);
+});
+
+app.post('/api/kb/tree', async (req, res) => {
+  const { token_id, kb_id, parent_id } = req.body;
+
+  if (!token_id || !kb_id) {
+    res.json({ code: -1, msg: 'token_id and kb_id are required' });
+    return;
+  }
+
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
+
+  if (!tokenRecord) {
+    res.json({ code: -1, msg: 'Token not found or inactive' });
+    return;
+  }
+
+  const payload: Record<string, unknown> = { kb_id };
+  if (parent_id) {
+    payload.parent_id = parent_id;
+  }
+
+  const result = await callWikiApi<{ tree: unknown[] }>(
+    '/api/v1/content/tree',
+    payload,
+    tokenRecord.token
+  );
+
+  res.json(result);
+});
+
+app.post('/api/kb/content', async (req, res) => {
+  const { token_id, kb_id, content_ids, content_type } = req.body;
+
+  if (!token_id || !kb_id || !content_ids || !content_type) {
+    res.json({ code: -1, msg: 'token_id, kb_id, content_ids, and content_type are required' });
+    return;
+  }
+
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
+
+  if (!tokenRecord) {
+    res.json({ code: -1, msg: 'Token not found or inactive' });
+    return;
+  }
+
+  const result = await callWikiApi<{ contents: unknown[] }>(
+    '/api/v1/content/body',
+    { content_ids, content_type },
+    tokenRecord.token
+  );
+
+  res.json(result);
+});
+
+app.post('/api/kb/search', async (req, res) => {
+  const { token_id, kb_id, keyword, page, page_size } = req.body;
+
+  if (!token_id || !kb_id || !keyword) {
+    res.json({ code: -1, msg: 'token_id, kb_id, and keyword are required' });
+    return;
+  }
+
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
+
+  if (!tokenRecord) {
+    res.json({ code: -1, msg: 'Token not found or inactive' });
+    return;
+  }
+
+  const result = await callWikiApi<{ results: unknown[]; total: number }>(
+    '/api/v1/content/search',
+    {
+      kb_id,
+      keyword,
+      page: page || 1,
+      page_size: page_size || 20,
+    },
+    tokenRecord.token
+  );
+
+  res.json(result);
+});
+
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  console.error('Error:', err);
+  res.status(500).json({ code: -1, msg: err.message || 'Internal server error' });
+});
+
+async function main() {
+  await initStore();
+  app.listen(PORT, () => {
+    console.log(`KM-API server running on port ${PORT}`);
+    console.log(`Health check: http://localhost:${PORT}/api/health`);
+  });
+}
+
+main().catch(console.error);
