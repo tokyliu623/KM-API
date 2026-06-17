@@ -182,6 +182,7 @@ app.get('/api/admin/tokens/list', async (req, res) => {
     });
 });
 app.post('/api/admin/tokens/update', async (req, res) => {
+    var _a;
     const { id, kb_name, kb_id, owner, token, env, status, remark } = req.body;
     if (!id) {
         res.json({ code: -1, msg: 'Token ID is required' });
@@ -213,8 +214,18 @@ app.post('/api/admin/tokens/update', async (req, res) => {
         updateData.token = token;
     if (env !== undefined)
         updateData.env = env;
-    if (status !== undefined)
+    if (status !== undefined) {
+        const currentStatus = db.tokens[index].status;
+        const validTransitions = {
+            active: ['revoked'],
+            revoked: ['active'],
+        };
+        if (!((_a = validTransitions[currentStatus]) === null || _a === void 0 ? void 0 : _a.includes(status))) {
+            res.json({ code: -1, msg: `Invalid status transition from ${currentStatus} to ${status}` });
+            return;
+        }
         updateData.status = status;
+    }
     if (remark !== undefined)
         updateData.remark = remark;
     db.tokens[index] = Object.assign(Object.assign({}, db.tokens[index]), updateData);
@@ -301,16 +312,81 @@ app.post('/api/kb/content', async (req, res) => {
         res.json({ code: -1, msg: 'token_id, content_ids, and content_type are required' });
         return;
     }
+    if (!['markdown', 'html'].includes(content_type)) {
+        res.json({ code: -1, msg: 'content_type must be "markdown" or "html"' });
+        return;
+    }
     const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
     const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
     if (!tokenRecord) {
         res.json({ code: -1, msg: 'Token not found or inactive' });
         return;
     }
+    if (tokenRecord.kb_id !== kb_id) {
+        res.json({ code: -1, msg: 'kb_id does not match token associated kb_id' });
+        return;
+    }
     const result = await callWikiApi('/api/knowledge/v1/openapi/kb/getContentBody', {
         contentIds: content_ids.map((id) => parseInt(String(id), 10)),
         contentType: content_type,
     }, tokenRecord.token);
+    res.json(result);
+});
+app.post('/api/kb/contents/create', async (req, res) => {
+    const { token_id, kb_id, parent_id, title, content_type, content } = req.body;
+    if (!token_id || !kb_id) {
+        res.json({ code: -1, msg: 'token_id and kb_id are required' });
+        return;
+    }
+    if (!content_type || !content) {
+        res.json({ code: -1, msg: 'content_type and content are required' });
+        return;
+    }
+    const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
+    const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
+    if (!tokenRecord) {
+        res.json({ code: -1, msg: 'Token not found or inactive' });
+        return;
+    }
+    const payload = {
+        kbId: parseInt(kb_id, 10),
+        contentType: content_type,
+        content: content,
+    };
+    if (parent_id) {
+        payload.parentId = parseInt(parent_id, 10);
+    }
+    if (title) {
+        payload.title = title;
+    }
+    const result = await callWikiApi('/api/knowledge/v1/openapi/kb/contents/create', payload, tokenRecord.token);
+    res.json(result);
+});
+app.post('/api/kb/contents/update', async (req, res) => {
+    const { token_id, content_id, title, content_type, content } = req.body;
+    if (!token_id || !content_id) {
+        res.json({ code: -1, msg: 'token_id and content_id are required' });
+        return;
+    }
+    if (!content_type || !content) {
+        res.json({ code: -1, msg: 'content_type and content are required' });
+        return;
+    }
+    const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
+    const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
+    if (!tokenRecord) {
+        res.json({ code: -1, msg: 'Token not found or inactive' });
+        return;
+    }
+    const payload = {
+        contentId: parseInt(content_id, 10),
+        contentType: content_type,
+        content: content,
+    };
+    if (title) {
+        payload.title = title;
+    }
+    const result = await callWikiApi('/api/knowledge/v1/openapi/kb/contents/update', payload, tokenRecord.token);
     res.json(result);
 });
 app.use((err, req, res, next) => {

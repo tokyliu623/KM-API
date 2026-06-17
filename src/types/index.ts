@@ -61,10 +61,3 @@ export interface UpdateTokenRequest {
 export interface RevokeTokenRequest {
   id: string;
 }
-
-export interface KbProxyRequest {
-  kb_id: string;
-  path: string;
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
-  body?: Record<string, unknown>;
-}
