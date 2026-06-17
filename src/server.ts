@@ -3,6 +3,7 @@ import cors from 'cors';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 5052;
@@ -48,7 +49,37 @@ interface AuditDB {
   logs: AuditRecord[];
 }
 
-interface VivoApiResponse<T = unknown> {
+interface KbInfo {
+  kbId: number;
+  kbName: string;
+  effectivePermType: string;
+  accessBlocked: boolean;
+  link: string;
+}
+
+interface ContentTreeNode {
+  id: number;
+  spaceId: number;
+  kbId: number;
+  parentId: number | null;
+  title: string;
+  hasChild: boolean;
+  spaceName: string;
+  kbName: string;
+}
+
+interface ContentBody {
+  contentId: number;
+  title: string;
+  content: string;
+  kbId: number;
+  kbName: string;
+  spaceId: number;
+  spaceName: string;
+  link: string;
+}
+
+interface ApiResponse<T = unknown> {
   code: number;
   msg: string;
   data?: T;
@@ -96,19 +127,25 @@ async function logAudit(data: Omit<AuditRecord, 'id' | 'created_at'>): Promise<v
   await writeJsonFile(AUDIT_FILE, db);
 }
 
+function generateRequestId(): string {
+  return `req-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+}
+
 async function callWikiApi<T>(
   endpoint: string,
   payload: Record<string, unknown>,
   accessToken: string
-): Promise<VivoApiResponse<T>> {
+): Promise<ApiResponse<T>> {
   const url = `${WIKI_BASE_URL}${endpoint}`;
+  const requestId = generateRequestId();
 
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
+        'accessToken': accessToken,
+        'requestId': requestId,
       },
       body: JSON.stringify(payload),
     });
@@ -129,15 +166,15 @@ async function callWikiApi<T>(
   }
 }
 
-async function testToken(token: string): Promise<{ valid: boolean; error?: string }> {
-  const result = await callWikiApi<{ kb_list: Array<{ id: string; name: string }> }>(
-    '/api/v1/kb/list',
+async function testToken(token: string): Promise<{ valid: boolean; error?: string; kbList?: KbInfo[] }> {
+  const result = await callWikiApi<KbInfo[]>(
+    '/api/knowledge/v1/openapi/kb/info',
     {},
     token
   );
 
-  if (result.code === 0) {
-    return { valid: true };
+  if (result.code === 1) {
+    return { valid: true, kbList: result.data || [] };
   }
 
   return {
@@ -155,43 +192,6 @@ function maskToken(token: string): string {
 
 function getClientIp(req: Request): string {
   return (req.headers['x-forwarded-for'] as string) || req.ip || 'unknown';
-}
-
-async function withAudit(
-  action: string,
-  kbName: string,
-  fn: () => Promise<VivoApiResponse<unknown>>
-): Promise<VivoApiResponse<unknown>> {
-  const startTime = Date.now();
-  const req = {} as Request;
-
-  try {
-    const result = await fn();
-    await logAudit({
-      token_id: '',
-      kb_name: kbName,
-      action,
-      user_ip: getClientIp(req),
-      latency_ms: Date.now() - startTime,
-      status: result.code === 0 || result.code === 1 ? 'success' : 'failed',
-      error: result.code !== 0 && result.code !== 1 ? result.msg : undefined,
-    });
-    return result;
-  } catch (err) {
-    await logAudit({
-      token_id: '',
-      kb_name: kbName,
-      action,
-      user_ip: getClientIp(req),
-      latency_ms: Date.now() - startTime,
-      status: 'failed',
-      error: err instanceof Error ? err.message : 'Unknown error',
-    });
-    return {
-      code: -1,
-      msg: err instanceof Error ? err.message : 'Unknown error',
-    };
-  }
 }
 
 app.get('/api/health', async (req, res) => {
@@ -379,10 +379,10 @@ app.post('/api/admin/tokens/revoke', async (req, res) => {
 });
 
 app.post('/api/kb/info', async (req, res) => {
-  const { token_id, kb_id } = req.body;
+  const { token_id } = req.body;
 
-  if (!token_id || !kb_id) {
-    res.json({ code: -1, msg: 'token_id and kb_id are required' });
+  if (!token_id) {
+    res.json({ code: -1, msg: 'token_id is required' });
     return;
   }
 
@@ -394,8 +394,8 @@ app.post('/api/kb/info', async (req, res) => {
     return;
   }
 
-  const result = await callWikiApi<{ kb_list: Array<{ id: string; name: string; owner: string }> }>(
-    '/api/v1/kb/list',
+  const result = await callWikiApi<KbInfo[]>(
+    '/api/knowledge/v1/openapi/kb/info',
     {},
     tokenRecord.token
   );
@@ -419,13 +419,13 @@ app.post('/api/kb/tree', async (req, res) => {
     return;
   }
 
-  const payload: Record<string, unknown> = { kb_id };
+  const payload: Record<string, unknown> = { kbId: parseInt(kb_id, 10) };
   if (parent_id) {
-    payload.parent_id = parent_id;
+    payload.parentId = parseInt(parent_id, 10);
   }
 
-  const result = await callWikiApi<{ tree: unknown[] }>(
-    '/api/v1/content/tree',
+  const result = await callWikiApi<ContentTreeNode[]>(
+    '/api/knowledge/v1/openapi/kb/content-tree',
     payload,
     tokenRecord.token
   );
@@ -436,8 +436,8 @@ app.post('/api/kb/tree', async (req, res) => {
 app.post('/api/kb/content', async (req, res) => {
   const { token_id, kb_id, content_ids, content_type } = req.body;
 
-  if (!token_id || !kb_id || !content_ids || !content_type) {
-    res.json({ code: -1, msg: 'token_id, kb_id, content_ids, and content_type are required' });
+  if (!token_id || !content_ids || !content_type) {
+    res.json({ code: -1, msg: 'token_id, content_ids, and content_type are required' });
     return;
   }
 
@@ -449,38 +449,11 @@ app.post('/api/kb/content', async (req, res) => {
     return;
   }
 
-  const result = await callWikiApi<{ contents: unknown[] }>(
-    '/api/v1/content/body',
-    { content_ids, content_type },
-    tokenRecord.token
-  );
-
-  res.json(result);
-});
-
-app.post('/api/kb/search', async (req, res) => {
-  const { token_id, kb_id, keyword, page, page_size } = req.body;
-
-  if (!token_id || !kb_id || !keyword) {
-    res.json({ code: -1, msg: 'token_id, kb_id, and keyword are required' });
-    return;
-  }
-
-  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
-  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-
-  if (!tokenRecord) {
-    res.json({ code: -1, msg: 'Token not found or inactive' });
-    return;
-  }
-
-  const result = await callWikiApi<{ results: unknown[]; total: number }>(
-    '/api/v1/content/search',
+  const result = await callWikiApi<{ type: string; content: ContentBody[] }>(
+    '/api/knowledge/v1/openapi/kb/getContentBody',
     {
-      kb_id,
-      keyword,
-      page: page || 1,
-      page_size: page_size || 20,
+      contentIds: content_ids.map((id: string | number) => parseInt(String(id), 10)),
+      contentType: content_type,
     },
     tokenRecord.token
   );
