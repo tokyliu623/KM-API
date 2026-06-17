@@ -1,0 +1,16 @@
+services:
+  km-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: km-api
+    ports:
+      - "5052:5052"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - WIKI_BASE_URL=https://wiki.vivo.xyz
+      - PORT=5052
+      - TOKEN_STORE_FILE=./data/token-store.json
+      - AUDIT_LOG_FILE=./data/audit-log.json
+    restart: unless-stopped
