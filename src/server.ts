@@ -219,6 +219,8 @@ app.post('/api/admin/tokens/upload', async (req, res) => {
     return;
   }
 
+  const realKbName = tokenTest.kbList?.find((kb) => String(kb.kbId) === String(kb_id))?.kbName || kb_name;
+
   const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
   const existing = db.tokens.find((t) => t.kb_id === kb_id && t.env === env && t.status === 'active');
 
@@ -229,7 +231,7 @@ app.post('/api/admin/tokens/upload', async (req, res) => {
 
   const newToken: TokenRecord = {
     id: uuidv4(),
-    kb_name,
+    kb_name: realKbName,
     kb_id,
     owner,
     token,
@@ -245,7 +247,7 @@ app.post('/api/admin/tokens/upload', async (req, res) => {
 
   await logAudit({
     token_id: newToken.id,
-    kb_name,
+    kb_name: realKbName,
     action: 'token_upload',
     status: 'success',
   });
