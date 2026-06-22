@@ -467,7 +467,7 @@ app.post('/api/kb/content', async (req, res) => {
     return;
   }
 
-  if (tokenRecord.kb_id !== kb_id) {
+  if (parseInt(tokenRecord.kb_id, 10) !== parseInt(kb_id, 10)) {
     res.json({ code: -1, msg: 'kb_id does not match token associated kb_id' });
     return;
   }

@@ -111,6 +111,7 @@ app.get('/api/health', async (req, res) => {
     });
 });
 app.post('/api/admin/tokens/upload', async (req, res) => {
+    var _a, _b;
     const { kb_name, kb_id, owner, token, env, remark } = req.body;
     if (!kb_name || !kb_id || !owner || !token || !env) {
         res.json({ code: -1, msg: 'Missing required fields' });
@@ -121,6 +122,7 @@ app.post('/api/admin/tokens/upload', async (req, res) => {
         res.json({ code: -1, msg: `Token validation failed: ${tokenTest.error}` });
         return;
     }
+    const realKbName = ((_b = (_a = tokenTest.kbList) === null || _a === void 0 ? void 0 : _a.find((kb) => String(kb.kbId) === String(kb_id))) === null || _b === void 0 ? void 0 : _b.kbName) || kb_name;
     const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
     const existing = db.tokens.find((t) => t.kb_id === kb_id && t.env === env && t.status === 'active');
     if (existing) {
@@ -129,7 +131,7 @@ app.post('/api/admin/tokens/upload', async (req, res) => {
     }
     const newToken = {
         id: (0, uuid_1.v4)(),
-        kb_name,
+        kb_name: realKbName,
         kb_id,
         owner,
         token,
@@ -143,7 +145,7 @@ app.post('/api/admin/tokens/upload', async (req, res) => {
     await writeJsonFile(TOKEN_FILE, db);
     await logAudit({
         token_id: newToken.id,
-        kb_name,
+        kb_name: realKbName,
         action: 'token_upload',
         status: 'success',
     });
@@ -322,7 +324,7 @@ app.post('/api/kb/content', async (req, res) => {
         res.json({ code: -1, msg: 'Token not found or inactive' });
         return;
     }
-    if (tokenRecord.kb_id !== kb_id) {
+    if (parseInt(tokenRecord.kb_id, 10) !== parseInt(kb_id, 10)) {
         res.json({ code: -1, msg: 'kb_id does not match token associated kb_id' });
         return;
     }
