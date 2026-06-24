@@ -101,6 +101,20 @@ function maskToken(token) {
 function getClientIp(req) {
     return req.headers['x-forwarded-for'] || req.ip || 'unknown';
 }
+async function getTokenByKbId(kbId) {
+    const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
+    return db.tokens.find((t) => t.kb_id === String(kbId) && t.status === 'active') || null;
+}
+async function resolveToken(kb_id) {
+    if (!kb_id) {
+        return { tokenRecord: null, error: 'kb_id is required' };
+    }
+    const tokenRecord = await getTokenByKbId(kb_id);
+    if (!tokenRecord) {
+        return { tokenRecord: null, error: 'No active token found for this kb_id' };
+    }
+    return { tokenRecord, error: null };
+}
 app.get('/api/health', async (req, res) => {
     const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
     const activeTokens = db.tokens.filter((t) => t.status === 'active').length;
@@ -275,30 +289,28 @@ app.post('/api/admin/tokens/revoke', async (req, res) => {
     });
 });
 app.post('/api/kb/info', async (req, res) => {
-    const { token_id } = req.body;
-    if (!token_id) {
-        res.json({ code: -1, msg: 'token_id is required' });
+    const { kb_id } = req.body;
+    if (!kb_id) {
+        res.json({ code: -1, msg: 'kb_id is required' });
         return;
     }
-    const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
-    const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-    if (!tokenRecord) {
-        res.json({ code: -1, msg: 'Token not found or inactive' });
+    const { tokenRecord, error } = await resolveToken(kb_id);
+    if (error || !tokenRecord) {
+        res.json({ code: -1, msg: error || 'Token not found or inactive' });
         return;
     }
     const result = await callWikiApi('/api/knowledge/v1/openapi/kb/info', {}, tokenRecord.token);
     res.json(result);
 });
 app.post('/api/kb/tree', async (req, res) => {
-    const { token_id, kb_id, parent_id } = req.body;
-    if (!token_id || !kb_id) {
-        res.json({ code: -1, msg: 'token_id and kb_id are required' });
+    const { kb_id, parent_id } = req.body;
+    if (!kb_id) {
+        res.json({ code: -1, msg: 'kb_id is required' });
         return;
     }
-    const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
-    const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-    if (!tokenRecord) {
-        res.json({ code: -1, msg: 'Token not found or inactive' });
+    const { tokenRecord, error } = await resolveToken(kb_id);
+    if (error || !tokenRecord) {
+        res.json({ code: -1, msg: error || 'Token not found or inactive' });
         return;
     }
     const payload = { kbId: parseInt(kb_id, 10) };
@@ -309,19 +321,18 @@ app.post('/api/kb/tree', async (req, res) => {
     res.json(result);
 });
 app.post('/api/kb/content', async (req, res) => {
-    const { token_id, kb_id, content_ids, content_type } = req.body;
-    if (!token_id || !content_ids || !content_type) {
-        res.json({ code: -1, msg: 'token_id, content_ids, and content_type are required' });
+    const { kb_id, content_ids, content_type } = req.body;
+    if (!content_ids || !content_type) {
+        res.json({ code: -1, msg: 'content_ids and content_type are required' });
         return;
     }
     if (!['markdown', 'html'].includes(content_type)) {
         res.json({ code: -1, msg: 'content_type must be "markdown" or "html"' });
         return;
     }
-    const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
-    const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-    if (!tokenRecord) {
-        res.json({ code: -1, msg: 'Token not found or inactive' });
+    const { tokenRecord, error } = await resolveToken(kb_id);
+    if (error || !tokenRecord) {
+        res.json({ code: -1, msg: error || 'Token not found or inactive' });
         return;
     }
     if (parseInt(tokenRecord.kb_id, 10) !== parseInt(kb_id, 10)) {
@@ -335,19 +346,18 @@ app.post('/api/kb/content', async (req, res) => {
     res.json(result);
 });
 app.post('/api/kb/contents/create', async (req, res) => {
-    const { token_id, kb_id, parent_id, title, content_type, content } = req.body;
-    if (!token_id || !kb_id) {
-        res.json({ code: -1, msg: 'token_id and kb_id are required' });
+    const { kb_id, parent_id, title, content_type, content } = req.body;
+    if (!kb_id) {
+        res.json({ code: -1, msg: 'kb_id is required' });
         return;
     }
     if (!content_type || !content) {
         res.json({ code: -1, msg: 'content_type and content are required' });
         return;
     }
-    const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
-    const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-    if (!tokenRecord) {
-        res.json({ code: -1, msg: 'Token not found or inactive' });
+    const { tokenRecord, error } = await resolveToken(kb_id);
+    if (error || !tokenRecord) {
+        res.json({ code: -1, msg: error || 'Token not found or inactive' });
         return;
     }
     const payload = {
@@ -365,19 +375,22 @@ app.post('/api/kb/contents/create', async (req, res) => {
     res.json(result);
 });
 app.post('/api/kb/contents/update', async (req, res) => {
-    const { token_id, content_id, title, content_type, content } = req.body;
-    if (!token_id || !content_id) {
-        res.json({ code: -1, msg: 'token_id and content_id are required' });
+    const { kb_id, content_id, title, content_type, content } = req.body;
+    if (!content_id) {
+        res.json({ code: -1, msg: 'content_id is required' });
+        return;
+    }
+    if (!kb_id) {
+        res.json({ code: -1, msg: 'kb_id is required' });
         return;
     }
     if (!content_type || !content) {
         res.json({ code: -1, msg: 'content_type and content are required' });
         return;
     }
-    const db = await readJsonFile(TOKEN_FILE, { tokens: [] });
-    const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-    if (!tokenRecord) {
-        res.json({ code: -1, msg: 'Token not found or inactive' });
+    const { tokenRecord, error } = await resolveToken(kb_id);
+    if (error || !tokenRecord) {
+        res.json({ code: -1, msg: error || 'Token not found or inactive' });
         return;
     }
     const payload = {

@@ -194,6 +194,23 @@ function getClientIp(req: Request): string {
   return (req.headers['x-forwarded-for'] as string) || req.ip || 'unknown';
 }
 
+async function getTokenByKbId(kbId: string): Promise<TokenRecord | null> {
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  return db.tokens.find((t) => t.kb_id === String(kbId) && t.status === 'active') || null;
+}
+
+async function resolveToken(kb_id: string): Promise<{ tokenRecord: TokenRecord | null; error: string | null }> {
+  if (!kb_id) {
+    return { tokenRecord: null, error: 'kb_id is required' };
+  }
+
+  const tokenRecord = await getTokenByKbId(kb_id);
+  if (!tokenRecord) {
+    return { tokenRecord: null, error: 'No active token found for this kb_id' };
+  }
+  return { tokenRecord, error: null };
+}
+
 app.get('/api/health', async (req, res) => {
   const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
   const activeTokens = db.tokens.filter((t) => t.status === 'active').length;
@@ -392,18 +409,16 @@ app.post('/api/admin/tokens/revoke', async (req, res) => {
 });
 
 app.post('/api/kb/info', async (req, res) => {
-  const { token_id } = req.body;
+  const { kb_id } = req.body;
 
-  if (!token_id) {
-    res.json({ code: -1, msg: 'token_id is required' });
+  if (!kb_id) {
+    res.json({ code: -1, msg: 'kb_id is required' });
     return;
   }
 
-  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
-  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-
-  if (!tokenRecord) {
-    res.json({ code: -1, msg: 'Token not found or inactive' });
+  const { tokenRecord, error } = await resolveToken(kb_id);
+  if (error || !tokenRecord) {
+    res.json({ code: -1, msg: error || 'Token not found or inactive' });
     return;
   }
 
@@ -417,18 +432,16 @@ app.post('/api/kb/info', async (req, res) => {
 });
 
 app.post('/api/kb/tree', async (req, res) => {
-  const { token_id, kb_id, parent_id } = req.body;
+  const { kb_id, parent_id } = req.body;
 
-  if (!token_id || !kb_id) {
-    res.json({ code: -1, msg: 'token_id and kb_id are required' });
+  if (!kb_id) {
+    res.json({ code: -1, msg: 'kb_id is required' });
     return;
   }
 
-  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
-  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-
-  if (!tokenRecord) {
-    res.json({ code: -1, msg: 'Token not found or inactive' });
+  const { tokenRecord, error } = await resolveToken(kb_id);
+  if (error || !tokenRecord) {
+    res.json({ code: -1, msg: error || 'Token not found or inactive' });
     return;
   }
 
@@ -447,10 +460,10 @@ app.post('/api/kb/tree', async (req, res) => {
 });
 
 app.post('/api/kb/content', async (req, res) => {
-  const { token_id, kb_id, content_ids, content_type } = req.body;
+  const { kb_id, content_ids, content_type } = req.body;
 
-  if (!token_id || !content_ids || !content_type) {
-    res.json({ code: -1, msg: 'token_id, content_ids, and content_type are required' });
+  if (!content_ids || !content_type) {
+    res.json({ code: -1, msg: 'content_ids and content_type are required' });
     return;
   }
 
@@ -459,11 +472,9 @@ app.post('/api/kb/content', async (req, res) => {
     return;
   }
 
-  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
-  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-
-  if (!tokenRecord) {
-    res.json({ code: -1, msg: 'Token not found or inactive' });
+  const { tokenRecord, error } = await resolveToken(kb_id);
+  if (error || !tokenRecord) {
+    res.json({ code: -1, msg: error || 'Token not found or inactive' });
     return;
   }
 
@@ -485,10 +496,10 @@ app.post('/api/kb/content', async (req, res) => {
 });
 
 app.post('/api/kb/contents/create', async (req, res) => {
-  const { token_id, kb_id, parent_id, title, content_type, content } = req.body;
+  const { kb_id, parent_id, title, content_type, content } = req.body;
 
-  if (!token_id || !kb_id) {
-    res.json({ code: -1, msg: 'token_id and kb_id are required' });
+  if (!kb_id) {
+    res.json({ code: -1, msg: 'kb_id is required' });
     return;
   }
 
@@ -497,11 +508,9 @@ app.post('/api/kb/contents/create', async (req, res) => {
     return;
   }
 
-  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
-  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-
-  if (!tokenRecord) {
-    res.json({ code: -1, msg: 'Token not found or inactive' });
+  const { tokenRecord, error } = await resolveToken(kb_id);
+  if (error || !tokenRecord) {
+    res.json({ code: -1, msg: error || 'Token not found or inactive' });
     return;
   }
 
@@ -529,10 +538,15 @@ app.post('/api/kb/contents/create', async (req, res) => {
 });
 
 app.post('/api/kb/contents/update', async (req, res) => {
-  const { token_id, content_id, title, content_type, content } = req.body;
+  const { kb_id, content_id, title, content_type, content } = req.body;
 
-  if (!token_id || !content_id) {
-    res.json({ code: -1, msg: 'token_id and content_id are required' });
+  if (!content_id) {
+    res.json({ code: -1, msg: 'content_id is required' });
+    return;
+  }
+
+  if (!kb_id) {
+    res.json({ code: -1, msg: 'kb_id is required' });
     return;
   }
 
@@ -541,11 +555,9 @@ app.post('/api/kb/contents/update', async (req, res) => {
     return;
   }
 
-  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
-  const tokenRecord = db.tokens.find((t) => t.id === token_id && t.status === 'active');
-
-  if (!tokenRecord) {
-    res.json({ code: -1, msg: 'Token not found or inactive' });
+  const { tokenRecord, error } = await resolveToken(kb_id);
+  if (error || !tokenRecord) {
+    res.json({ code: -1, msg: error || 'Token not found or inactive' });
     return;
   }
 
