@@ -57,7 +57,7 @@ function cleanupExpiredSessions() {
   }
 }
 
-setInterval(cleanupExpiredSessions, 60 * 1000);
+const sessionCleanupTimer = setInterval(cleanupExpiredSessions, 60 * 1000);
 
 interface TokenRecord {
   id: string;
@@ -671,6 +671,9 @@ app.post('/api/llm/translate', async (req, res) => {
   }
 
   const sessionKey = kb_id || 'default';
+  if (!sessionKey) {
+    return res.status(400).json({ error: 'kb_id is required' });
+  }
   let session = translateSessions.get(sessionKey);
 
   if (!session) {
@@ -691,14 +694,15 @@ app.post('/api/llm/translate', async (req, res) => {
 
   try {
     const requestBody: Record<string, unknown> = {
-      query: prompt,
+      query: `${systemPrompt}\n\n${prompt}`,
       inputs: {},
       response_mode: 'blocking',
       user: 'km-api',
     };
 
-    if (session.conversationId) {
-      requestBody.conversation_id = session.conversationId;
+    const requestConversationId = conversation_id || session.conversationId;
+    if (requestConversationId) {
+      requestBody.conversation_id = requestConversationId;
     }
 
     console.log('[DEBUG] 九问 API 请求:', LLM_API_URL);
