@@ -11,6 +11,9 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const TOKEN_FILE = path.join(DATA_DIR, 'token-store.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'audit-log.json');
 const WIKI_BASE_URL = process.env.WIKI_BASE_URL || 'https://wiki.vivo.xyz';
+const LLM_API_URL = process.env.LLM_API_URL || 'http://jiuwen-api.vmic.xyz/v1/chat/completions';
+const LLM_API_KEY = process.env.LLM_API_KEY || '';
+const LLM_MODEL = process.env.LLM_MODEL || 'gpt-3.5-turbo';
 
 app.use(cors());
 app.use(express.json());
@@ -408,6 +411,44 @@ app.post('/api/admin/tokens/revoke', async (req, res) => {
   });
 });
 
+app.post('/api/admin/tokens/delete', async (req, res) => {
+  const { id } = req.body;
+
+  if (!id) {
+    res.json({ code: -1, msg: 'Token ID is required' });
+    return;
+  }
+
+  const db = await readJsonFile<TokenStoreDB>(TOKEN_FILE, { tokens: [] });
+  const index = db.tokens.findIndex((t) => t.id === id);
+
+  if (index === -1) {
+    res.json({ code: -1, msg: 'Token不存在' });
+    return;
+  }
+
+  if (db.tokens[index].status !== 'revoked') {
+    res.json({ code: -1, msg: '只能删除已撤销的Token' });
+    return;
+  }
+
+  const kb_name = db.tokens[index].kb_name;
+  db.tokens.splice(index, 1);
+  await writeJsonFile(TOKEN_FILE, db);
+
+  await logAudit({
+    token_id: id,
+    kb_name,
+    action: 'token_delete',
+    status: 'success',
+  });
+
+  res.json({
+    code: 1,
+    msg: 'Token已删除',
+  });
+});
+
 app.post('/api/kb/info', async (req, res) => {
   const { kb_id } = req.body;
 
@@ -578,6 +619,61 @@ app.post('/api/kb/contents/update', async (req, res) => {
   );
 
   res.json(result);
+});
+
+app.post('/api/llm/translate', async (req, res) => {
+  const { prompt } = req.body;
+
+  if (!prompt) {
+    res.json({ success: false, error: 'prompt is required' });
+    return;
+  }
+
+  const systemPrompt = `你是一个专业的翻译专家，负责将中文翻译为英文。请遵循以下规则：
+1. 只返回翻译结果，不要添加任何解释或额外内容
+2. 翻译要简洁、专业、符合技术文档风格
+3. 使用小写字母和连字符（kebab-case）格式
+4. 如果是Skill名称，返回JSON格式：{"candidates": ["xxx-xxx-xxx"]}
+5. 如果是多个候选名称，返回多个选项`;
+
+  const timeoutMs = 30000;
+
+  try {
+    const fetchPromise = fetch(LLM_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LLM_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: LLM_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.3,
+      }),
+    });
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Request timeout (30s)')), timeoutMs);
+    });
+
+    const response = await Promise.race([fetchPromise, timeoutPromise]) as unknown as { ok: boolean; status: number; json: () => Promise<{ choices?: Array<{ message?: { content?: string } }> }> };
+
+    if (!response.ok) {
+      res.json({ success: false, error: `API error: ${response.status}` });
+      return;
+    }
+
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const content = data.choices?.[0]?.message?.content || '';
+
+    res.json({ success: true, data: { content } });
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+    res.json({ success: false, error: errorMessage });
+  }
 });
 
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
