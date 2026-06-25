@@ -662,7 +662,7 @@ app.post('/api/llm/translate', async (req, res) => {
 
   try {
     const requestBody = {
-      query: `${systemPrompt}\n\n${prompt}`,
+      query: prompt,
       inputs: {},
       response_mode: 'blocking',
       user: 'km-api',
