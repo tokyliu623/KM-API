@@ -40,6 +40,25 @@ const LLM_BOT_ID = process.env.LLM_BOT_ID || '';
 app.use(cors());
 app.use(express.json());
 
+interface TranslateSession {
+  conversationId: string | null;
+  lastUsed: number;
+}
+
+const translateSessions = new Map<string, TranslateSession>();
+const SESSION_TIMEOUT_MS = 60 * 60 * 1000;
+
+function cleanupExpiredSessions() {
+  const now = Date.now();
+  for (const [kbId, session] of translateSessions.entries()) {
+    if (now - session.lastUsed > SESSION_TIMEOUT_MS) {
+      translateSessions.delete(kbId);
+    }
+  }
+}
+
+setInterval(cleanupExpiredSessions, 60 * 1000);
+
 interface TokenRecord {
   id: string;
   kb_name: string;
@@ -644,12 +663,22 @@ app.post('/api/kb/contents/update', async (req, res) => {
 });
 
 app.post('/api/llm/translate', async (req, res) => {
-  const { prompt } = req.body;
+  const { prompt, kb_id, conversation_id } = req.body;
 
   if (!prompt) {
     res.json({ success: false, error: 'prompt is required' });
     return;
   }
+
+  const sessionKey = kb_id || 'default';
+  let session = translateSessions.get(sessionKey);
+
+  if (!session) {
+    session = { conversationId: null, lastUsed: Date.now() };
+    translateSessions.set(sessionKey, session);
+  }
+
+  session.lastUsed = Date.now();
 
   const systemPrompt = `你是一个专业的翻译专家，负责将中文翻译为英文。请遵循以下规则：
 1. 只返回翻译结果，不要添加任何解释或额外内容
@@ -661,12 +690,16 @@ app.post('/api/llm/translate', async (req, res) => {
   const timeoutMs = 35000;
 
   try {
-    const requestBody = {
+    const requestBody: Record<string, unknown> = {
       query: prompt,
       inputs: {},
       response_mode: 'blocking',
       user: 'km-api',
     };
+
+    if (session.conversationId) {
+      requestBody.conversation_id = session.conversationId;
+    }
 
     console.log('[DEBUG] 九问 API 请求:', LLM_API_URL);
     console.log('[DEBUG] 请求体:', JSON.stringify(requestBody));
@@ -708,7 +741,11 @@ app.post('/api/llm/translate', async (req, res) => {
 
     const content = data.answer || data.data?.answer || '';
 
-    res.json({ success: true, data: { content } });
+    if (data.conversation_id && !session.conversationId) {
+      session.conversationId = data.conversation_id;
+    }
+
+    res.json({ success: true, data: { content, conversation_id: session.conversationId } });
   } catch (err: any) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
     console.log('[DEBUG] 九问 API 异常:', errorMessage);
