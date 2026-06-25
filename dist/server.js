@@ -42,6 +42,17 @@ const LLM_API_KEY = process.env.LLM_API_KEY || '';
 const LLM_BOT_ID = process.env.LLM_BOT_ID || '';
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
+const translateSessions = new Map();
+const SESSION_TIMEOUT_MS = 60 * 60 * 1000;
+function cleanupExpiredSessions() {
+    const now = Date.now();
+    for (const [kbId, session] of translateSessions.entries()) {
+        if (now - session.lastUsed > SESSION_TIMEOUT_MS) {
+            translateSessions.delete(kbId);
+        }
+    }
+}
+const sessionCleanupTimer = setInterval(cleanupExpiredSessions, 60 * 1000);
 async function readJsonFile(filepath, defaultValue) {
     try {
         const content = await fs_1.promises.readFile(filepath, 'utf-8');
@@ -461,11 +472,21 @@ app.post('/api/kb/contents/update', async (req, res) => {
 });
 app.post('/api/llm/translate', async (req, res) => {
     var _a;
-    const { prompt } = req.body;
+    const { prompt, kb_id, conversation_id } = req.body;
     if (!prompt) {
         res.json({ success: false, error: 'prompt is required' });
         return;
     }
+    const sessionKey = kb_id || 'default';
+    if (!sessionKey) {
+        return res.status(400).json({ error: 'kb_id is required' });
+    }
+    let session = translateSessions.get(sessionKey);
+    if (!session) {
+        session = { conversationId: null, lastUsed: Date.now() };
+        translateSessions.set(sessionKey, session);
+    }
+    session.lastUsed = Date.now();
     const systemPrompt = `你是一个专业的翻译专家，负责将中文翻译为英文。请遵循以下规则：
 1. 只返回翻译结果，不要添加任何解释或额外内容
 2. 翻译要简洁、专业、符合技术文档风格
@@ -475,11 +496,15 @@ app.post('/api/llm/translate', async (req, res) => {
     const timeoutMs = 35000;
     try {
         const requestBody = {
-            query: prompt,
+            query: `${systemPrompt}\n\n${prompt}`,
             inputs: {},
             response_mode: 'blocking',
             user: 'km-api',
         };
+        const requestConversationId = conversation_id || session.conversationId;
+        if (requestConversationId) {
+            requestBody.conversation_id = requestConversationId;
+        }
         console.log('[DEBUG] 九问 API 请求:', LLM_API_URL);
         console.log('[DEBUG] 请求体:', JSON.stringify(requestBody));
         const { stdout, stderr } = await execFileAsync('curl', [
@@ -513,7 +538,10 @@ app.post('/api/llm/translate', async (req, res) => {
             return;
         }
         const content = data.answer || ((_a = data.data) === null || _a === void 0 ? void 0 : _a.answer) || '';
-        res.json({ success: true, data: { content } });
+        if (data.conversation_id && !session.conversationId) {
+            session.conversationId = data.conversation_id;
+        }
+        res.json({ success: true, data: { content, conversation_id: session.conversationId } });
     }
     catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Unknown error';
