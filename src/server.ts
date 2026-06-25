@@ -11,9 +11,9 @@ const DATA_DIR = path.join(process.cwd(), 'data');
 const TOKEN_FILE = path.join(DATA_DIR, 'token-store.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'audit-log.json');
 const WIKI_BASE_URL = process.env.WIKI_BASE_URL || 'https://wiki.vivo.xyz';
-const LLM_API_URL = process.env.LLM_API_URL || 'http://jiuwen-api.vmic.xyz/v1/chat/completions';
+const LLM_API_URL = process.env.LLM_API_URL || 'http://jiuwen-api.vmic.xyz/v1/chat-messages';
 const LLM_API_KEY = process.env.LLM_API_KEY || '';
-const LLM_MODEL = process.env.LLM_MODEL || 'gpt-3.5-turbo';
+const LLM_BOT_ID = process.env.LLM_BOT_ID || '';
 
 app.use(cors());
 app.use(express.json());
@@ -646,12 +646,10 @@ app.post('/api/llm/translate', async (req, res) => {
         'Authorization': `Bearer ${LLM_API_KEY}`,
       },
       body: JSON.stringify({
-        model: LLM_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt },
-        ],
-        temperature: 0.3,
+        query: prompt,
+        inputs: {},
+        response_mode: 'blocking',
+        user: 'km-api',
       }),
     });
 
@@ -659,15 +657,20 @@ app.post('/api/llm/translate', async (req, res) => {
       setTimeout(() => reject(new Error('Request timeout (30s)')), timeoutMs);
     });
 
-    const response = await Promise.race([fetchPromise, timeoutPromise]) as unknown as { ok: boolean; status: number; json: () => Promise<{ choices?: Array<{ message?: { content?: string } }> }> };
+    const response = await Promise.race([fetchPromise, timeoutPromise]) as unknown as { ok: boolean; status: number; json: () => Promise<{ answer?: string; error?: string }> };
 
     if (!response.ok) {
       res.json({ success: false, error: `API error: ${response.status}` });
       return;
     }
 
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data.choices?.[0]?.message?.content || '';
+    const data = await response.json() as { answer?: string; error?: string };
+    if (data.error) {
+      res.json({ success: false, error: data.error });
+      return;
+    }
+
+    const content = data.answer || '';
 
     res.json({ success: true, data: { content } });
   } catch (err) {

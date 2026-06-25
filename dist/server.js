@@ -15,9 +15,9 @@ const DATA_DIR = path_1.default.join(process.cwd(), 'data');
 const TOKEN_FILE = path_1.default.join(DATA_DIR, 'token-store.json');
 const AUDIT_FILE = path_1.default.join(DATA_DIR, 'audit-log.json');
 const WIKI_BASE_URL = process.env.WIKI_BASE_URL || 'https://wiki.vivo.xyz';
-const LLM_API_URL = process.env.LLM_API_URL || 'http://jiuwen-api.vmic.xyz/v1/chat/completions';
+const LLM_API_URL = process.env.LLM_API_URL || 'http://jiuwen-api.vmic.xyz/v1/chat-messages';
 const LLM_API_KEY = process.env.LLM_API_KEY || '';
-const LLM_MODEL = process.env.LLM_MODEL || 'gpt-3.5-turbo';
+const LLM_BOT_ID = process.env.LLM_BOT_ID || '';
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
 async function readJsonFile(filepath, defaultValue) {
@@ -438,7 +438,6 @@ app.post('/api/kb/contents/update', async (req, res) => {
     res.json(result);
 });
 app.post('/api/llm/translate', async (req, res) => {
-    var _a, _b, _c;
     const { prompt } = req.body;
     if (!prompt) {
         res.json({ success: false, error: 'prompt is required' });
@@ -459,12 +458,10 @@ app.post('/api/llm/translate', async (req, res) => {
                 'Authorization': `Bearer ${LLM_API_KEY}`,
             },
             body: JSON.stringify({
-                model: LLM_MODEL,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: prompt },
-                ],
-                temperature: 0.3,
+                query: prompt,
+                inputs: {},
+                response_mode: 'blocking',
+                user: 'km-api',
             }),
         });
         const timeoutPromise = new Promise((_, reject) => {
@@ -476,7 +473,11 @@ app.post('/api/llm/translate', async (req, res) => {
             return;
         }
         const data = await response.json();
-        const content = ((_c = (_b = (_a = data.choices) === null || _a === void 0 ? void 0 : _a[0]) === null || _b === void 0 ? void 0 : _b.message) === null || _c === void 0 ? void 0 : _c.content) || '';
+        if (data.error) {
+            res.json({ success: false, error: data.error });
+            return;
+        }
+        const content = data.answer || '';
         res.json({ success: true, data: { content } });
     }
     catch (err) {
