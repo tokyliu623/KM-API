@@ -3,6 +3,9 @@ import cors from 'cors';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+const execFileAsync = promisify(execFile);
 const fetch = require('node-fetch');
 
 async function loadEnvFile() {
@@ -655,54 +658,58 @@ app.post('/api/llm/translate', async (req, res) => {
 4. 如果是Skill名称，返回JSON格式：{"candidates": ["xxx-xxx-xxx"]}
 5. 如果是多个候选名称，返回多个选项`;
 
-  const timeoutMs = 30000;
+  const timeoutMs = 35000;
 
   try {
     const requestBody = {
-      query: prompt,
+      query: `${systemPrompt}\n\n${prompt}`,
       inputs: {},
       response_mode: 'blocking',
       user: 'km-api',
     };
+
     console.log('[DEBUG] 九问 API 请求:', LLM_API_URL);
     console.log('[DEBUG] 请求体:', JSON.stringify(requestBody));
 
-    const fetchPromise = fetch(LLM_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${LLM_API_KEY}`,
-      },
-      body: JSON.stringify(requestBody),
-    });
+    const { stdout, stderr } = await execFileAsync('curl', [
+      '-s',
+      '-X', 'POST',
+      LLM_API_URL,
+      '-H', 'Content-Type: application/json',
+      '-H', `Authorization: Bearer ${LLM_API_KEY}`,
+      '-d', JSON.stringify(requestBody),
+      '--max-time', '30',
+    ], { timeout: timeoutMs });
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('Request timeout (30s)')), timeoutMs);
-    });
+    if (stderr) {
+      console.log('[DEBUG] curl stderr:', stderr);
+    }
 
-    const response = await Promise.race([fetchPromise, timeoutPromise]) as unknown as { ok: boolean; status: number; statusText: string; json: () => Promise<unknown> };
-
-    console.log('[DEBUG] 九问 API 响应状态:', response.status, response.statusText);
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.log('[DEBUG] 九问 API 错误响应:', JSON.stringify(errorData));
-      res.json({ success: false, error: `API error: ${response.status}`, details: errorData });
+    let data: any;
+    try {
+      data = JSON.parse(stdout);
+    } catch {
+      console.log('[DEBUG] curl 返回非 JSON:', stdout);
+      res.json({ success: false, error: 'Invalid response from upstream API', raw: stdout });
       return;
     }
 
-    const data = await response.json() as { answer?: string; error?: string };
-    console.log('[DEBUG] 九问 API 成功响应:', JSON.stringify(data));
+    console.log('[DEBUG] 九问 API 响应:', JSON.stringify(data));
+
+    if (data.code && data.code !== 200 && data.code !== 0) {
+      res.json({ success: false, error: `API error: ${data.message || data.msg || 'Unknown'}`, details: data });
+      return;
+    }
 
     if (data.error) {
       res.json({ success: false, error: data.error });
       return;
     }
 
-    const content = data.answer || '';
+    const content = data.answer || data.data?.answer || '';
 
     res.json({ success: true, data: { content } });
-  } catch (err) {
+  } catch (err: any) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
     console.log('[DEBUG] 九问 API 异常:', errorMessage);
     res.json({ success: false, error: errorMessage });

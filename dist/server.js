@@ -8,6 +8,9 @@ const cors_1 = __importDefault(require("cors"));
 const fs_1 = require("fs");
 const path_1 = __importDefault(require("path"));
 const uuid_1 = require("uuid");
+const child_process_1 = require("child_process");
+const util_1 = require("util");
+const execFileAsync = (0, util_1.promisify)(child_process_1.execFile);
 const fetch = require('node-fetch');
 async function loadEnvFile() {
     const envPath = path_1.default.join(process.cwd(), '.env');
@@ -457,6 +460,7 @@ app.post('/api/kb/contents/update', async (req, res) => {
     res.json(result);
 });
 app.post('/api/llm/translate', async (req, res) => {
+    var _a;
     const { prompt } = req.body;
     if (!prompt) {
         res.json({ success: false, error: 'prompt is required' });
@@ -468,42 +472,47 @@ app.post('/api/llm/translate', async (req, res) => {
 3. 使用小写字母和连字符（kebab-case）格式
 4. 如果是Skill名称，返回JSON格式：{"candidates": ["xxx-xxx-xxx"]}
 5. 如果是多个候选名称，返回多个选项`;
-    const timeoutMs = 30000;
+    const timeoutMs = 35000;
     try {
         const requestBody = {
-            query: prompt,
+            query: `${systemPrompt}\n\n${prompt}`,
             inputs: {},
             response_mode: 'blocking',
             user: 'km-api',
         };
         console.log('[DEBUG] 九问 API 请求:', LLM_API_URL);
         console.log('[DEBUG] 请求体:', JSON.stringify(requestBody));
-        const fetchPromise = fetch(LLM_API_URL, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${LLM_API_KEY}`,
-            },
-            body: JSON.stringify(requestBody),
-        });
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Request timeout (30s)')), timeoutMs);
-        });
-        const response = await Promise.race([fetchPromise, timeoutPromise]);
-        console.log('[DEBUG] 九问 API 响应状态:', response.status, response.statusText);
-        if (!response.ok) {
-            const errorData = await response.json();
-            console.log('[DEBUG] 九问 API 错误响应:', JSON.stringify(errorData));
-            res.json({ success: false, error: `API error: ${response.status}`, details: errorData });
+        const { stdout, stderr } = await execFileAsync('curl', [
+            '-s',
+            '-X', 'POST',
+            LLM_API_URL,
+            '-H', 'Content-Type: application/json',
+            '-H', `Authorization: Bearer ${LLM_API_KEY}`,
+            '-d', JSON.stringify(requestBody),
+            '--max-time', '30',
+        ], { timeout: timeoutMs });
+        if (stderr) {
+            console.log('[DEBUG] curl stderr:', stderr);
+        }
+        let data;
+        try {
+            data = JSON.parse(stdout);
+        }
+        catch (_b) {
+            console.log('[DEBUG] curl 返回非 JSON:', stdout);
+            res.json({ success: false, error: 'Invalid response from upstream API', raw: stdout });
             return;
         }
-        const data = await response.json();
-        console.log('[DEBUG] 九问 API 成功响应:', JSON.stringify(data));
+        console.log('[DEBUG] 九问 API 响应:', JSON.stringify(data));
+        if (data.code && data.code !== 200 && data.code !== 0) {
+            res.json({ success: false, error: `API error: ${data.message || data.msg || 'Unknown'}`, details: data });
+            return;
+        }
         if (data.error) {
             res.json({ success: false, error: data.error });
             return;
         }
-        const content = data.answer || '';
+        const content = data.answer || ((_a = data.data) === null || _a === void 0 ? void 0 : _a.answer) || '';
         res.json({ success: true, data: { content } });
     }
     catch (err) {
