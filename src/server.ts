@@ -1,3 +1,6 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { promises as fs } from 'fs';
@@ -639,32 +642,42 @@ app.post('/api/llm/translate', async (req, res) => {
   const timeoutMs = 30000;
 
   try {
+    const requestBody = {
+      query: prompt,
+      inputs: {},
+      response_mode: 'blocking',
+      user: 'km-api',
+    };
+    console.log('[DEBUG] 九问 API 请求:', LLM_API_URL);
+    console.log('[DEBUG] 请求体:', JSON.stringify(requestBody));
+
     const fetchPromise = fetch(LLM_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${LLM_API_KEY}`,
       },
-      body: JSON.stringify({
-        query: prompt,
-        inputs: {},
-        response_mode: 'blocking',
-        user: 'km-api',
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error('Request timeout (30s)')), timeoutMs);
     });
 
-    const response = await Promise.race([fetchPromise, timeoutPromise]) as unknown as { ok: boolean; status: number; json: () => Promise<{ answer?: string; error?: string }> };
+    const response = await Promise.race([fetchPromise, timeoutPromise]) as unknown as { ok: boolean; status: number; statusText: string; json: () => Promise<unknown> };
+
+    console.log('[DEBUG] 九问 API 响应状态:', response.status, response.statusText);
 
     if (!response.ok) {
-      res.json({ success: false, error: `API error: ${response.status}` });
+      const errorData = await response.json();
+      console.log('[DEBUG] 九问 API 错误响应:', JSON.stringify(errorData));
+      res.json({ success: false, error: `API error: ${response.status}`, details: errorData });
       return;
     }
 
     const data = await response.json() as { answer?: string; error?: string };
+    console.log('[DEBUG] 九问 API 成功响应:', JSON.stringify(data));
+
     if (data.error) {
       res.json({ success: false, error: data.error });
       return;
@@ -675,6 +688,7 @@ app.post('/api/llm/translate', async (req, res) => {
     res.json({ success: true, data: { content } });
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+    console.log('[DEBUG] 九问 API 异常:', errorMessage);
     res.json({ success: false, error: errorMessage });
   }
 });
