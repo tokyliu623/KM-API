@@ -3,14 +3,31 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-const dotenv_1 = __importDefault(require("dotenv"));
-dotenv_1.default.config();
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const fs_1 = require("fs");
 const path_1 = __importDefault(require("path"));
 const uuid_1 = require("uuid");
 const fetch = require('node-fetch');
+async function loadEnvFile() {
+    const envPath = path_1.default.join(process.cwd(), '.env');
+    try {
+        const content = await fs_1.promises.readFile(envPath, 'utf-8');
+        for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (trimmed && !trimmed.startsWith('#')) {
+                const [key, ...valueParts] = trimmed.split('=');
+                if (key && valueParts.length > 0) {
+                    process.env[key.trim()] = valueParts.join('=').trim();
+                }
+            }
+        }
+    }
+    catch (_a) {
+        // .env file not found, use defaults
+    }
+}
+loadEnvFile();
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 5052;
 const DATA_DIR = path_1.default.join(process.cwd(), 'data');

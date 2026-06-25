@@ -1,12 +1,28 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 const fetch = require('node-fetch');
+
+async function loadEnvFile() {
+  const envPath = path.join(process.cwd(), '.env');
+  try {
+    const content = await fs.readFile(envPath, 'utf-8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith('#')) {
+        const [key, ...valueParts] = trimmed.split('=');
+        if (key && valueParts.length > 0) {
+          process.env[key.trim()] = valueParts.join('=').trim();
+        }
+      }
+    }
+  } catch {
+    // .env file not found, use defaults
+  }
+}
+loadEnvFile();
 
 const app = express();
 const PORT = process.env.PORT || 5052;
