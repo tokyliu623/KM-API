@@ -1,5 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import * as fsSync from 'fs';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
@@ -8,10 +9,10 @@ import { promisify } from 'util';
 const execFileAsync = promisify(execFile);
 const fetch = require('node-fetch');
 
-async function loadEnvFile() {
+function loadEnvFile() {
   const envPath = path.join(process.cwd(), '.env');
   try {
-    const content = await fs.readFile(envPath, 'utf-8');
+    const content = fsSync.readFileSync(envPath, 'utf-8');
     for (const line of content.split('\n')) {
       const trimmed = line.trim();
       if (trimmed && !trimmed.startsWith('#')) {
