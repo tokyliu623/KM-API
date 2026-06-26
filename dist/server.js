@@ -523,7 +523,7 @@ app.post('/api/llm/translate', async (req, res) => {
             query: prompt,
             inputs: {},
             response_mode: 'blocking',
-            user: 'km-api',
+            user: kb_id ? String(kb_id) : 'km-api',
         };
         const requestConversationId = conversation_id || session.conversationId;
         if (requestConversationId) {
