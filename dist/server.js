@@ -511,12 +511,6 @@ app.post('/api/llm/translate', async (req, res) => {
         translateSessions.set(sessionKey, session);
     }
     session.lastUsed = Date.now();
-    const systemPrompt = `你是一个专业的翻译专家，负责将中文翻译为英文。请遵循以下规则：
-1. 只返回翻译结果，不要添加任何解释或额外内容
-2. 翻译要简洁、专业、符合技术文档风格
-3. 使用小写字母和连字符（kebab-case）格式
-4. 如果是Skill名称，返回JSON格式：{"candidates": ["xxx-xxx-xxx"]}
-5. 如果是多个候选名称，返回多个选项`;
     const timeoutMs = 35000;
     try {
         const requestBody = {
@@ -553,19 +547,25 @@ app.post('/api/llm/translate', async (req, res) => {
             return;
         }
         console.log('[DEBUG] 九问 API 响应:', JSON.stringify(data));
-        if (data.code && data.code !== 200 && data.code !== 0) {
-            res.json({ success: false, error: `API error: ${data.message || data.msg || 'Unknown'}`, details: data });
-            return;
+        if (typeof data === 'object' && data !== null) {
+            const d = data;
+            if (d.code && d.code !== 200 && d.code !== 0) {
+                res.json({ success: false, error: `API error: ${d.message || d.msg || 'Unknown'}`, details: d });
+                return;
+            }
+            if (d.error) {
+                res.json({ success: false, error: d.error });
+                return;
+            }
+            const content = d.answer || ((_a = d.data) === null || _a === void 0 ? void 0 : _a.answer) || '';
+            if (d.conversation_id && !session.conversationId) {
+                session.conversationId = d.conversation_id;
+            }
+            res.json({ success: true, data: { content, conversation_id: session.conversationId } });
         }
-        if (data.error) {
-            res.json({ success: false, error: data.error });
-            return;
+        else {
+            res.json({ success: false, error: 'Invalid response from upstream API' });
         }
-        const content = data.answer || ((_a = data.data) === null || _a === void 0 ? void 0 : _a.answer) || '';
-        if (data.conversation_id && !session.conversationId) {
-            session.conversationId = data.conversation_id;
-        }
-        res.json({ success: true, data: { content, conversation_id: session.conversationId } });
     }
     catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Unknown error';
@@ -584,5 +584,13 @@ async function main() {
         console.log(`Health check: http://localhost:${PORT}/api/health`);
     });
 }
+process.on('SIGINT', () => {
+    clearInterval(sessionCleanupTimer);
+    process.exit(0);
+});
+process.on('SIGTERM', () => {
+    clearInterval(sessionCleanupTimer);
+    process.exit(0);
+});
 main().catch(console.error);
 //# sourceMappingURL=server.js.map

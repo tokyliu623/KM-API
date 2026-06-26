@@ -684,13 +684,6 @@ app.post('/api/llm/translate', async (req, res) => {
 
   session.lastUsed = Date.now();
 
-  const systemPrompt = `你是一个专业的翻译专家，负责将中文翻译为英文。请遵循以下规则：
-1. 只返回翻译结果，不要添加任何解释或额外内容
-2. 翻译要简洁、专业、符合技术文档风格
-3. 使用小写字母和连字符（kebab-case）格式
-4. 如果是Skill名称，返回JSON格式：{"candidates": ["xxx-xxx-xxx"]}
-5. 如果是多个候选名称，返回多个选项`;
-
   const timeoutMs = 35000;
 
   try {
@@ -723,7 +716,7 @@ app.post('/api/llm/translate', async (req, res) => {
       console.log('[DEBUG] curl stderr:', stderr);
     }
 
-    let data: any;
+    let data: unknown;
     try {
       data = JSON.parse(stdout);
     } catch {
@@ -734,24 +727,29 @@ app.post('/api/llm/translate', async (req, res) => {
 
     console.log('[DEBUG] 九问 API 响应:', JSON.stringify(data));
 
-    if (data.code && data.code !== 200 && data.code !== 0) {
-      res.json({ success: false, error: `API error: ${data.message || data.msg || 'Unknown'}`, details: data });
-      return;
+    if (typeof data === 'object' && data !== null) {
+      const d = data as Record<string, unknown>;
+      if (d.code && d.code !== 200 && d.code !== 0) {
+        res.json({ success: false, error: `API error: ${d.message || d.msg || 'Unknown'}`, details: d });
+        return;
+      }
+
+      if (d.error) {
+        res.json({ success: false, error: d.error as string });
+        return;
+      }
+
+      const content = d.answer || (d.data as Record<string, unknown>)?.answer || '';
+
+      if (d.conversation_id && !session.conversationId) {
+        session.conversationId = d.conversation_id as string;
+      }
+
+      res.json({ success: true, data: { content, conversation_id: session.conversationId } });
+    } else {
+      res.json({ success: false, error: 'Invalid response from upstream API' });
     }
-
-    if (data.error) {
-      res.json({ success: false, error: data.error });
-      return;
-    }
-
-    const content = data.answer || data.data?.answer || '';
-
-    if (data.conversation_id && !session.conversationId) {
-      session.conversationId = data.conversation_id;
-    }
-
-    res.json({ success: true, data: { content, conversation_id: session.conversationId } });
-  } catch (err: any) {
+  } catch (err: unknown) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
     console.log('[DEBUG] 九问 API 异常:', errorMessage);
     res.json({ success: false, error: errorMessage });
@@ -770,5 +768,15 @@ async function main() {
     console.log(`Health check: http://localhost:${PORT}/api/health`);
   });
 }
+
+process.on('SIGINT', () => {
+  clearInterval(sessionCleanupTimer);
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  clearInterval(sessionCleanupTimer);
+  process.exit(0);
+});
 
 main().catch(console.error);
